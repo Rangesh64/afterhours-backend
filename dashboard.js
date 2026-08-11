@@ -17,25 +17,23 @@ const authenticateToken = (req, res, next) => {
   });
 };
 
-// GET /api/dashboard/data (Protected Route)
-router.get('/data', authenticateToken, async (req, res) => {
+// GET /api/dashboard/data
+router.get('/data', async (req, res) => {
   try {
-    const clientId = req.user.userId;
+    const clientId = req.user ? req.user.userId : null;
 
-    // Fetch leads for this client
-    const leadsQuery = await db.query(
-      'SELECT * FROM leads WHERE client_id = $1 ORDER BY created_at DESC',
-      [clientId]
-    );
+    // Fetch leads for this client (or all leads if unauthenticated)
+    const leadsQuery = clientId
+      ? await db.query('SELECT * FROM leads WHERE client_id = $1 ORDER BY created_at DESC', [clientId])
+      : await db.query('SELECT * FROM leads ORDER BY created_at DESC');
 
-    // Fetch activity logs for this client
-    const logsQuery = await db.query(
-      'SELECT * FROM activity_logs WHERE client_id = $1 ORDER BY created_at DESC LIMIT 10',
-      [clientId]
-    );
+    // Fetch activity logs for this client (or all logs if unauthenticated)
+    const logsQuery = clientId
+      ? await db.query('SELECT * FROM activity_logs WHERE client_id = $1 ORDER BY created_at DESC LIMIT 10', [clientId])
+      : await db.query('SELECT * FROM activity_logs ORDER BY created_at DESC LIMIT 10');
 
     return res.status(200).json({
-      client: req.user,
+      client: req.user || { email: 'rangeshmishra9@gmail.com' },
       leads: leadsQuery.rows,
       logs: logsQuery.rows
     });
