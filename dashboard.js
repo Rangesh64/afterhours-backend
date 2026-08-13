@@ -85,4 +85,45 @@ router.get('/data', async (req, res) => {
   }
 });
 
+// POST /api/dashboard/calls/log
+// Route to ingest live calls from AI Receptionist, Webhooks, or Spreadsheets
+router.post('/calls/log', async (req, res) => {
+  try {
+    const { 
+      client_email,    // Client's registered email (e.g., 'rangeshmishra9@gmail.com')
+      caller_phone,    // Incoming lead phone number
+      dispatched_via,  // e.g., 'WhatsApp + Email'
+      outcome          // e.g., 'RECOVERED', 'BOOKING SENT', 'PROCESSING'
+    } = req.body;
+
+    if (!client_email || !caller_phone) {
+      return res.status(400).json({ error: 'Missing client_email or caller_phone' });
+    }
+
+    if (!db || !db.from) {
+      return res.status(500).json({ error: 'Database instance not initialized' });
+    }
+
+    // Insert into Supabase activity_logs table
+    const { data, error } = await db
+      .from('activity_logs')
+      .insert([
+        {
+          user_email: client_email.toLowerCase().trim(),
+          contact: caller_phone,
+          channels: dispatched_via || 'WhatsApp + Email',
+          outcome: outcome || 'RECOVERED',
+          created_at: new Date().toISOString()
+        }
+      ]);
+
+    if (error) throw error;
+
+    return res.status(200).json({ success: true, message: 'Call log saved to client dashboard', data });
+  } catch (err) {
+    console.error('[CALL LOG ERROR]', err);
+    return res.status(500).json({ error: err.message });
+  }
+});
+
 module.exports = router;
