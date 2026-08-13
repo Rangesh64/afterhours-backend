@@ -5,36 +5,62 @@ const db = require('./db');
 // Live Dashboard Data Endpoint
 router.get('/data', async (req, res) => {
   try {
-    const userEmail = req.user?.email || req.headers['x-user-email'] || 'rangeshmishra9@gmail.com';
+    const userEmail = (req.headers['x-user-email'] || req.user?.email || 'rangeshmishra9@gmail.com').toLowerCase().trim();
 
     let subData = null;
     let logsData = [];
     let integData = [];
 
-    if (db.from) {
-      // Fetch Subscription
-      const { data: sub } = await db
-        .from('subscriptions')
-        .select('*')
-        .eq('user_email', userEmail)
-        .single();
-      subData = sub;
+    // Check if database client exists and try fetching
+    if (db && db.from) {
+      try {
+        const { data: sub } = await db
+          .from('subscriptions')
+          .select('*')
+          .eq('user_email', userEmail)
+          .maybeSingle();
 
-      // Fetch Activity Logs
-      const { data: logs } = await db
-        .from('activity_logs')
-        .select('*')
-        .eq('user_email', userEmail)
-        .order('created_at', { ascending: false })
-        .limit(10);
-      logsData = logs || [];
+        if (sub) subData = sub;
 
-      // Fetch Integrations
-      const { data: integs } = await db
-        .from('integrations')
-        .select('*')
-        .eq('user_email', userEmail);
-      integData = integs || [];
+        const { data: logs } = await db
+          .from('activity_logs')
+          .select('*')
+          .eq('user_email', userEmail)
+          .order('created_at', { ascending: false })
+          .limit(10);
+          
+        if (logs) logsData = logs;
+
+        const { data: integs } = await db
+          .from('integrations')
+          .select('*')
+          .eq('user_email', userEmail);
+
+        if (integs) integData = integs;
+      } catch (dbErr) {
+        console.warn('[DASHBOARD DB FETCH WARNING]', dbErr.message);
+      }
+    }
+
+    // Default Fallback Subscriptions based on email if DB row not present
+    if (!subData) {
+      if (userEmail === 'rangeshmishra9@gmail.com' || userEmail === 'afterhoursautomation714@gmail.com' || userEmail === 'mahmiasubham@gmail.com') {
+        subData = {
+          plan_name: 'Lifetime Founder Mesh',
+          billing_cycle: 'Lifetime Unlimited',
+          renewal_date: '2099-12-31',
+          days_remaining: 9999,
+          capacity: 'Unlimited Multi-Channel Routes'
+        };
+      } else {
+        subData = {
+          plan_name: 'Enterprise Unlimited Mesh',
+          billing_cycle: 'Monthly Recurring',
+          renewal_date: '2026-09-13',
+          days_remaining: 30,
+          capacity: 'Unlimited Multi-Channel Routes'
+        };
+      }
     }
 
     res.json({
@@ -45,13 +71,7 @@ router.get('/data', async (req, res) => {
         companyName: 'AfterHours Executive',
         email: userEmail
       },
-      subscription: subData || {
-        plan_name: 'Enterprise Unlimited Mesh',
-        billing_cycle: 'Annual Enterprise',
-        renewal_date: '2027-04-12',
-        days_remaining: 242,
-        capacity: 'Unlimited Multi-Channel Routes'
-      },
+      subscription: subData,
       recentIntercepts: logsData,
       connectors: integData.length > 0 ? integData : [
         { name: 'Omni-Channel Listener Mesh', type: 'Sub-Second Gateway', status: 'ACTIVE' },
