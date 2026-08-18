@@ -1,5 +1,6 @@
 const express = require('express');
 const router = express.Router();
+const https = require('https');
 const { google } = require('googleapis');
 const db = require('./db');
 
@@ -16,6 +17,56 @@ function getSheetsClient() {
   });
 
   return google.sheets({ version: 'v4', auth });
+}
+
+// Helper to fetch Google Sheets via Direct Public CSV (bypasses Google Workspace/Cloud service account blocks)
+function fetchPublicSheetCSV(sheetId) {
+  return new Promise((resolve) => {
+    if (!sheetId) return resolve([]);
+    const csvUrl = `https://docs.google.com/spreadsheets/d/${sheetId}/export?format=csv`;
+
+    https.get(csvUrl, (res) => {
+      // Follow redirect if Google responds with 301/302/307
+      if (res.statusCode >= 300 && res.statusCode < 400 && res.headers.location) {
+        https.get(res.headers.location, (redirectRes) => {
+          let data = '';
+          redirectRes.on('data', (chunk) => { data += chunk; });
+          redirectRes.on('end', () => {
+            try {
+              const rows = parseCSVText(data);
+              resolve(rows);
+            } catch (err) {
+              resolve([]);
+            }
+          });
+        }).on('error', () => resolve([]));
+        return;
+      }
+
+      let data = '';
+      res.on('data', (chunk) => { data += chunk; });
+      res.on('end', () => {
+        try {
+          const rows = parseCSVText(data);
+          resolve(rows);
+        } catch (err) {
+          resolve([]);
+        }
+      });
+    }).on('error', () => resolve([]));
+  });
+}
+
+function parseCSVText(text) {
+  if (!text || text.includes('<!DOCTYPE html>') || text.includes('<html')) return [];
+  return text
+    .split(/\r?\n/)
+    .filter((line) => line.trim().length > 0)
+    .map((line) =>
+      line
+        .split(/,(?=(?:(?:[^"]*"){2})*[^"]*$)/)
+        .map((val) => val.replace(/^"|"$/g, '').trim())
+    );
 }
 
 // Live Dashboard Data Endpoint
@@ -93,27 +144,44 @@ router.get('/data', async (req, res) => {
     }
 
     // 2. Fetch live data from Google Sheets for connected integrations
-    if (integData.length > 0 && process.env.GOOGLE_SERVICE_ACCOUNT_KEY) {
-      try {
-        const sheetsApi = getSheetsClient();
+    if (integData.length > 0) {
+      let sheetsApi = null;
+      if (process.env.GOOGLE_SERVICE_ACCOUNT_KEY) {
+        try {
+          sheetsApi = getSheetsClient();
+        } catch (authErr) {
+          console.warn('[GOOGLE AUTH WARNING]', authErr.message);
+        }
+      }
 
-        for (const integ of integData) {
-          if (integ.sheet_id && integ.status === 'ACTIVE') {
-            const type = (integ.type || '').toLowerCase(); // 'voice', 'email', or 'whatsapp'
+      for (const integ of integData) {
+        if (integ.sheet_id && integ.status === 'ACTIVE') {
+          const type = (integ.type || '').toLowerCase(); // 'voice', 'email', or 'whatsapp'
+          let rows = [];
+
+          // Try 1: Direct Public CSV Fetch (works immediately if link sharing is set to Viewer)
+          try {
+            rows = await fetchPublicSheetCSV(integ.sheet_id);
+          } catch (csvErr) {
+            rows = [];
+          }
+
+          // Try 2: Google Sheets Service Account API Fallback
+          if ((!rows || rows.length === 0) && sheetsApi) {
             try {
               const sheetRes = await sheetsApi.spreadsheets.values.get({
                 spreadsheetId: integ.sheet_id,
-                range: 'Sheet1', // Assumes your tab is named Sheet1
+                range: 'Sheet1',
               });
-              sheetData[type] = sheetRes.data.values || [];
+              rows = sheetRes.data.values || [];
             } catch (sheetErr) {
               console.warn(`[SHEET FETCH WARNING for ${integ.name}]:`, sheetErr.message);
-              sheetData[type] = [];
+              rows = [];
             }
           }
+
+          sheetData[type] = rows;
         }
-      } catch (authErr) {
-        console.warn('[GOOGLE AUTH WARNING]', authErr.message);
       }
     }
 
