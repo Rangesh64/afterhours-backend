@@ -1,16 +1,38 @@
 const express = require('express');
 const router = express.Router();
+const { google } = require('googleapis');
 const db = require('./db');
+
+// Helper to initialize Google Sheets API using your service account key
+function getSheetsClient() {
+  if (!process.env.GOOGLE_SERVICE_ACCOUNT_KEY) {
+    throw new Error('GOOGLE_SERVICE_ACCOUNT_KEY is not defined in environment variables');
+  }
+
+  const credentials = JSON.parse(process.env.GOOGLE_SERVICE_ACCOUNT_KEY);
+  const auth = new google.auth.GoogleAuth({
+    credentials,
+    scopes: ['https://www.googleapis.com/auth/spreadsheets.readonly'],
+  });
+
+  return google.sheets({ version: 'v4', auth });
+}
 
 // Live Dashboard Data Endpoint
 router.get('/data', async (req, res) => {
   try {
-    const userEmail = (req.headers['x-user-email'] || req.user?.email || 'rangeshmishra9@gmail.com').toLowerCase().trim();
+    const userEmail = (
+      req.headers['x-user-email'] ||
+      req.query.email ||
+      req.user?.email ||
+      'rangeshmishra9@gmail.com'
+    ).toLowerCase().trim();
 
     let subData = null;
     let logsData = [];
     let integData = [];
     let creditLogs = [];
+    const sheetData = { voice: [], email: [], whatsapp: [] };
 
     // 1. Fetch live data from Database
     if (db && db.from) {
@@ -54,23 +76,48 @@ router.get('/data', async (req, res) => {
     } else if (db && db.query) {
       // PostgreSQL Pool syntax
       try {
-        const subRes = await db.query('SELECT * FROM subscriptions WHERE user_email = $1 LIMIT 1', [userEmail]);
+        const subRes = await db.query('SELECT * FROM subscriptions WHERE LOWER(user_email) = $1 LIMIT 1', [userEmail]);
         if (subRes.rows.length > 0) subData = subRes.rows[0];
 
-        const logsRes = await db.query('SELECT * FROM activity_logs WHERE user_email = $1 ORDER BY created_at DESC LIMIT 10', [userEmail]);
+        const logsRes = await db.query('SELECT * FROM activity_logs WHERE LOWER(user_email) = $1 ORDER BY created_at DESC LIMIT 10', [userEmail]);
         logsData = logsRes.rows;
 
-        const integRes = await db.query('SELECT * FROM integrations WHERE user_email = $1', [userEmail]);
+        const integRes = await db.query('SELECT * FROM integrations WHERE LOWER(user_email) = $1', [userEmail]);
         integData = integRes.rows;
 
-        const transRes = await db.query('SELECT * FROM credit_transactions WHERE user_email = $1 ORDER BY created_at DESC LIMIT 10', [userEmail]);
+        const transRes = await db.query('SELECT * FROM credit_transactions WHERE LOWER(user_email) = $1 ORDER BY created_at DESC LIMIT 10', [userEmail]);
         creditLogs = transRes.rows;
       } catch (pgErr) {
         console.warn('[DASHBOARD PG FETCH WARNING]', pgErr.message);
       }
     }
 
-    // 2. Default Fallback Subscriptions based on email if DB row not present
+    // 2. Fetch live data from Google Sheets for connected integrations
+    if (integData.length > 0 && process.env.GOOGLE_SERVICE_ACCOUNT_KEY) {
+      try {
+        const sheetsApi = getSheetsClient();
+
+        for (const integ of integData) {
+          if (integ.sheet_id && integ.status === 'ACTIVE') {
+            const type = (integ.type || '').toLowerCase(); // 'voice', 'email', or 'whatsapp'
+            try {
+              const sheetRes = await sheetsApi.spreadsheets.values.get({
+                spreadsheetId: integ.sheet_id,
+                range: 'Sheet1', // Assumes your tab is named Sheet1
+              });
+              sheetData[type] = sheetRes.data.values || [];
+            } catch (sheetErr) {
+              console.warn(`[SHEET FETCH WARNING for ${integ.name}]:`, sheetErr.message);
+              sheetData[type] = [];
+            }
+          }
+        }
+      } catch (authErr) {
+        console.warn('[GOOGLE AUTH WARNING]', authErr.message);
+      }
+    }
+
+    // 3. Default Fallback Subscriptions based on email if DB row not present
     if (!subData) {
       if (userEmail === 'rangeshmishra9@gmail.com' || userEmail === 'afterhoursautomation714@gmail.com' || userEmail === 'mahmiasubham@gmail.com') {
         subData = {
@@ -79,7 +126,7 @@ router.get('/data', async (req, res) => {
           renewal_date: '2099-12-31',
           days_remaining: 9999,
           capacity: 'Unlimited Multi-Channel Routes',
-          credits_balance: 50000
+          credits_balance: 50000,
         };
       } else {
         subData = {
@@ -88,12 +135,12 @@ router.get('/data', async (req, res) => {
           renewal_date: '2026-09-13',
           days_remaining: 30,
           capacity: 'Unlimited Multi-Channel Routes',
-          credits_balance: 5000
+          credits_balance: 5000,
         };
       }
     }
 
-    // 3. Return complete dashboard data payload
+    // 4. Return complete dashboard data payload
     res.json({
       totalLeads: logsData.length,
       activeIntercepts: logsData.length,
@@ -101,16 +148,17 @@ router.get('/data', async (req, res) => {
       creditsBalance: subData.credits_balance ?? 5000,
       client: {
         companyName: 'AfterHours Executive',
-        email: userEmail
+        email: userEmail,
       },
       subscription: subData,
       recentIntercepts: logsData,
       creditTransactions: creditLogs,
+      sheets: sheetData,
       connectors: integData.length > 0 ? integData : [
-        { name: 'Omni-Channel Listener Mesh', type: 'Sub-Second Gateway', status: 'ACTIVE' },
-        { name: 'WhatsApp Business API', type: 'Direct Interactive Message Bridge', status: 'ACTIVE' },
-        { name: 'Salesforce / HubSpot CRM', type: 'Real-Time Webhook Pipeline', status: 'SYNC ON' }
-      ]
+        { name: 'Live Voice Listener Gateway', type: 'voice', status: 'ACTIVE' },
+        { name: 'WhatsApp Business API', type: 'whatsapp', status: 'ACTIVE' },
+        { name: 'Salesforce / HubSpot CRM', type: 'crm', status: 'SYNC ON' },
+      ],
     });
   } catch (err) {
     console.error('[DASHBOARD DATA ERROR]', err);
@@ -119,15 +167,9 @@ router.get('/data', async (req, res) => {
 });
 
 // POST /api/dashboard/calls/log
-// Route to ingest live calls from AI Receptionist, Webhooks, or Spreadsheets
 router.post('/calls/log', async (req, res) => {
   try {
-    const { 
-      client_email,    // Client's registered email
-      caller_phone,    // Incoming lead phone number
-      dispatched_via,  // e.g., 'WhatsApp + Email'
-      outcome          // e.g., 'RECOVERED', 'BOOKING SENT', 'PROCESSING'
-    } = req.body;
+    const { client_email, caller_phone, dispatched_via, outcome } = req.body;
 
     if (!client_email || !caller_phone) {
       return res.status(400).json({ error: 'Missing client_email or caller_phone' });
@@ -147,8 +189,8 @@ router.post('/calls/log', async (req, res) => {
             contact: caller_phone,
             channels: channels,
             outcome: statusOutcome,
-            created_at: createdAt
-          }
+            created_at: createdAt,
+          },
         ]);
 
       if (error) throw error;
