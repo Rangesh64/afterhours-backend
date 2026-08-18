@@ -185,6 +185,27 @@ router.get('/data', async (req, res) => {
       }
     }
 
+    // Compute metric calculations and fallback stream from sheet rows
+    const voiceRows = Array.isArray(sheetData.voice) && sheetData.voice.length > 1 ? sheetData.voice.slice(1) : [];
+    const whatsappRows = Array.isArray(sheetData.whatsapp) && sheetData.whatsapp.length > 1 ? sheetData.whatsapp.slice(1) : [];
+    const emailRows = Array.isArray(sheetData.email) && sheetData.email.length > 1 ? sheetData.email.slice(1) : [];
+
+    const computedTotalLeads = logsData.length > 0 ? logsData.length : (voiceRows.length + whatsappRows.length);
+    const computedActiveIntercepts = logsData.length > 0 ? logsData.length : voiceRows.length;
+    const computedPipelineValue = computedTotalLeads * 250;
+
+    let computedRecentIntercepts = logsData;
+    if (computedRecentIntercepts.length === 0 && voiceRows.length > 0) {
+      computedRecentIntercepts = voiceRows.slice(0, 10).map((row, idx) => ({
+        id: `INT-${idx + 101}`,
+        contact: row[0] || 'Unknown Contact',
+        intercept_time: row[1] || 'Real-Time',
+        channels: 'Voice AI + WhatsApp',
+        outcome: row[2] ? 'RECOVERED' : 'RESOLVED',
+        created_at: new Date().toISOString()
+      }));
+    }
+
     // 3. Default Fallback Subscriptions based on email if DB row not present
     if (!subData) {
       if (userEmail === 'rangeshmishra9@gmail.com' || userEmail === 'afterhoursautomation714@gmail.com' || userEmail === 'mahmiasubham@gmail.com') {
@@ -210,16 +231,19 @@ router.get('/data', async (req, res) => {
 
     // 4. Return complete dashboard data payload
     res.json({
-      totalLeads: logsData.length,
-      activeIntercepts: logsData.length,
-      pipelineValue: 0,
+      totalLeads: computedTotalLeads,
+      activeIntercepts: computedActiveIntercepts,
+      pipelineValue: computedPipelineValue,
+      inquiriesIntercepted: voiceRows.length,
+      whatsappDispatched: whatsappRows.length,
+      emailDispatched: emailRows.length,
       creditsBalance: subData.credits_balance ?? 5000,
       client: {
         companyName: 'AfterHours Executive',
         email: userEmail,
       },
       subscription: subData,
-      recentIntercepts: logsData,
+      recentIntercepts: computedRecentIntercepts,
       creditTransactions: creditLogs,
       sheets: sheetData,
       connectors: integData.length > 0 ? integData : [
