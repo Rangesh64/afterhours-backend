@@ -19,41 +19,42 @@ function getSheetsClient() {
   return google.sheets({ version: 'v4', auth });
 }
 
-// Helper to fetch Google Sheets via Direct Public CSV (bypasses Google Workspace/Cloud service account blocks)
+// Helper to fetch Google Sheets via Direct Public CSV with CACHE-BUSTING
 function fetchPublicSheetCSV(sheetId) {
   return new Promise((resolve) => {
     if (!sheetId) return resolve([]);
-    const csvUrl = `https://docs.google.com/spreadsheets/d/${sheetId}/export?format=csv`;
+    
+    // Adding timestamp query param forces Google to serve fresh data every single request
+    const csvUrl = `https://docs.google.com/spreadsheets/d/${sheetId}/export?format=csv&_t=${Date.now()}`;
 
-    https.get(csvUrl, (res) => {
-      // Follow redirect if Google responds with 301/302/307
-      if (res.statusCode >= 300 && res.statusCode < 400 && res.headers.location) {
-        https.get(res.headers.location, (redirectRes) => {
-          let data = '';
-          redirectRes.on('data', (chunk) => { data += chunk; });
-          redirectRes.on('end', () => {
-            try {
-              const rows = parseCSVText(data);
-              resolve(rows);
-            } catch (err) {
-              resolve([]);
-            }
-          });
-        }).on('error', () => resolve([]));
-        return;
-      }
-
-      let data = '';
-      res.on('data', (chunk) => { data += chunk; });
-      res.on('end', () => {
-        try {
-          const rows = parseCSVText(data);
-          resolve(rows);
-        } catch (err) {
-          resolve([]);
+    const makeRequest = (url) => {
+      https.get(url, {
+        headers: {
+          'Cache-Control': 'no-cache, no-store, must-revalidate',
+          'Pragma': 'no-cache',
+          'Expires': '0'
         }
-      });
-    }).on('error', () => resolve([]));
+      }, (res) => {
+        // Follow redirect if Google responds with 301/302/307
+        if (res.statusCode >= 300 && res.statusCode < 400 && res.headers.location) {
+          makeRequest(res.headers.location);
+          return;
+        }
+
+        let data = '';
+        res.on('data', (chunk) => { data += chunk; });
+        res.on('end', () => {
+          try {
+            const rows = parseCSVText(data);
+            resolve(rows);
+          } catch (err) {
+            resolve([]);
+          }
+        });
+      }).on('error', () => resolve([]));
+    };
+
+    makeRequest(csvUrl);
   });
 }
 
@@ -71,6 +72,11 @@ function parseCSVText(text) {
 
 // Live Dashboard Data Endpoint
 router.get('/data', async (req, res) => {
+  // Prevent any browser or Edge CDN caching
+  res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate');
+  res.setHeader('Pragma', 'no-cache');
+  res.setHeader('Expires', '0');
+
   try {
     const userEmail = (
       req.headers['x-user-email'] ||
@@ -159,7 +165,7 @@ router.get('/data', async (req, res) => {
           const type = (integ.type || '').toLowerCase(); // 'voice', 'email', or 'whatsapp'
           let rows = [];
 
-          // Try 1: Direct Public CSV Fetch (works immediately if link sharing is set to Viewer)
+          // Try 1: Direct Public CSV Fetch with Cache-Buster
           try {
             rows = await fetchPublicSheetCSV(integ.sheet_id);
           } catch (csvErr) {
