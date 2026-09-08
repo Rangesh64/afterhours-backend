@@ -3,6 +3,7 @@ const router = express.Router();
 const https = require('https');
 const { google } = require('googleapis');
 const db = require('./db');
+const { deductClientCredits } = require('./credits');
 
 // Helper to initialize Google Sheets API using your service account key
 function getSheetsClient() {
@@ -142,7 +143,7 @@ router.get('/data', async (req, res) => {
         const integRes = await db.query('SELECT * FROM integrations WHERE LOWER(user_email) = $1', [userEmail]);
         integData = integRes.rows;
 
-        const transRes = await db.query('SELECT * FROM credit_transactions WHERE LOWER(user_email) = $1 ORDER BY created_at DESC LIMIT 10', [userEmail]);
+        const transRes = await db.query('SELECT * FROM credit_transactions WHERE LOWER(user_email) = $1 ORDER BY created_at DESC LIMIT 20', [userEmail]);
         creditLogs = transRes.rows;
       } catch (pgErr) {
         console.warn('[DASHBOARD PG FETCH WARNING]', pgErr.message);
@@ -267,17 +268,29 @@ router.get('/data', async (req, res) => {
 // POST /api/dashboard/calls/log
 router.post('/calls/log', async (req, res) => {
   try {
-    const { client_email, caller_phone, dispatched_via, outcome } = req.body;
+    const { 
+      client_email, 
+      caller_phone, 
+      dispatched_via, 
+      outcome, 
+      durationSeconds, 
+      isDirectWhatsAppBooking, 
+      isAdvanceVerified 
+    } = req.body;
 
     if (!client_email || !caller_phone) {
       return res.status(400).json({ error: 'Missing client_email or caller_phone' });
     }
 
     const email = client_email.toLowerCase().trim();
-    const channels = dispatched_via || 'WhatsApp + Email';
+    const channels = dispatched_via || 'Voice AI + WhatsApp';
     const statusOutcome = outcome || 'RECOVERED';
     const createdAt = new Date().toISOString();
+    const duration = parseInt(durationSeconds, 10) || 0;
 
+    let savedData = null;
+
+    // 1. Save Call to Database
     if (db && db.from) {
       const { data, error } = await db
         .from('activity_logs')
@@ -292,7 +305,7 @@ router.post('/calls/log', async (req, res) => {
         ]);
 
       if (error) throw error;
-      return res.status(200).json({ success: true, message: 'Call log saved to client dashboard', data });
+      savedData = data;
     } else if (db && db.query) {
       const insertQuery = `
         INSERT INTO activity_logs (user_email, contact, channels, outcome, created_at)
@@ -300,10 +313,44 @@ router.post('/calls/log', async (req, res) => {
         RETURNING *;
       `;
       const { rows } = await db.query(insertQuery, [email, caller_phone, channels, statusOutcome, createdAt]);
-      return res.status(200).json({ success: true, message: 'Call log saved to client dashboard', data: rows[0] });
+      savedData = rows[0];
     } else {
       return res.status(500).json({ error: 'Database instance not initialized' });
     }
+
+    // 2. Deduct Voice Call Credits based on duration
+    // Post-call WhatsApp text is included free (0 credits)
+    const voiceDeduction = await deductClientCredits(email, 'VOICE_CALL', {
+      durationSeconds: duration,
+      phone: caller_phone
+    });
+
+    // 3. Deduct 10 credits ONLY if this was a Direct Inbound WhatsApp AI Booking session
+    let whatsappDeduction = null;
+    if (isDirectWhatsAppBooking) {
+      whatsappDeduction = await deductClientCredits(email, 'WHATSAPP_FLOW', {
+        phone: caller_phone
+      });
+    }
+
+    // 4. Deduct 15 credits ONLY if an advance booking deposit / fake lead verification occurred
+    let advanceDeduction = null;
+    if (isAdvanceVerified) {
+      advanceDeduction = await deductClientCredits(email, 'ADVANCE_CONFIRMATION', {
+        phone: caller_phone
+      });
+    }
+
+    return res.status(200).json({ 
+      success: true, 
+      message: 'Call log saved and credits processed successfully', 
+      data: savedData,
+      deductions: {
+        voice: voiceDeduction,
+        whatsapp: whatsappDeduction,
+        advance: advanceDeduction
+      }
+    });
   } catch (err) {
     console.error('[CALL LOG ERROR]', err);
     return res.status(500).json({ error: err.message });
