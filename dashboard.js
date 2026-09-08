@@ -3,7 +3,7 @@ const router = express.Router();
 const https = require('https');
 const { google } = require('googleapis');
 const db = require('./db');
-const { deductClientCredits } = require('./credits');
+const { deductClientCredits, hasActiveServiceAccess, MINIMUM_ACTIVE_THRESHOLD } = require('./credits');
 
 // Helper to initialize Google Sheets API using your service account key
 function getSheetsClient() {
@@ -24,8 +24,7 @@ function getSheetsClient() {
 function fetchPublicSheetCSV(sheetId) {
   return new Promise((resolve) => {
     if (!sheetId) return resolve([]);
-    
-    // Adding timestamp query param forces Google to serve fresh data every single request
+
     const csvUrl = `https://docs.google.com/spreadsheets/d/${sheetId}/export?format=csv&_t=${Date.now()}`;
 
     const makeRequest = (url) => {
@@ -36,7 +35,6 @@ function fetchPublicSheetCSV(sheetId) {
           'Expires': '0'
         }
       }, (res) => {
-        // Follow redirect if Google responds with 301/302/307
         if (res.statusCode >= 300 && res.statusCode < 400 && res.headers.location) {
           makeRequest(res.headers.location);
           return;
@@ -70,6 +68,47 @@ function parseCSVText(text) {
         .map((val) => val.replace(/^"|"$/g, '').trim())
     );
 }
+
+// Pre-call & Channel Eligibility Status Check
+router.get('/status', async (req, res) => {
+  try {
+    const userEmail = (
+      req.headers['x-user-email'] ||
+      req.query.email ||
+      req.user?.email ||
+      'rangeshmishra9@gmail.com'
+    ).toLowerCase().trim();
+
+    const isAllowed = await hasActiveServiceAccess(userEmail);
+
+    let currentBalance = 0;
+    if (db && db.from) {
+      const { data } = await db
+        .from('subscriptions')
+        .select('credits_balance')
+        .eq('user_email', userEmail)
+        .maybeSingle();
+      currentBalance = data?.credits_balance ?? 0;
+    } else if (db && db.query) {
+      const result = await db.query(
+        'SELECT credits_balance FROM subscriptions WHERE LOWER(user_email) = $1 LIMIT 1',
+        [userEmail]
+      );
+      currentBalance = result.rows[0]?.credits_balance ?? 0;
+    }
+
+    return res.json({
+      client_email: userEmail,
+      allowService: isAllowed,
+      creditsBalance: currentBalance,
+      minimumThreshold: MINIMUM_ACTIVE_THRESHOLD,
+      status: isAllowed ? 'ACTIVE' : 'SUSPENDED_LOW_BALANCE'
+    });
+  } catch (err) {
+    console.error('[STATUS CHECK ERROR]', err);
+    return res.status(500).json({ error: err.message });
+  }
+});
 
 // Live Dashboard Data Endpoint
 router.get('/data', async (req, res) => {
@@ -275,6 +314,17 @@ router.post('/calls/log', async (req, res) => {
     }
 
     const email = client_email.toLowerCase().trim();
+
+    // Enforce 20-credit safety cutoff before processing
+    const hasAccess = await hasActiveServiceAccess(email);
+    if (!hasAccess) {
+      return res.status(403).json({
+        success: false,
+        blocked: true,
+        error: `Action blocked: Credit balance is below the ${MINIMUM_ACTIVE_THRESHOLD} minimum floor. Please recharge.`
+      });
+    }
+
     const channels = dispatched_via || 'Voice AI + WhatsApp';
     const statusOutcome = outcome || 'RECOVERED';
     const createdAt = new Date().toISOString();
@@ -312,7 +362,7 @@ router.post('/calls/log', async (req, res) => {
       return res.status(500).json({ error: 'Database instance not initialized' });
     }
 
-    // 2. Deduct Voice Call Credits based on duration
+    // 2. Deduct Voice Call Credits based on duration (<=20s = 5 credits, >20s = 25/min)
     const voiceDeduction = await deductClientCredits(email, 'VOICE_CALL', {
       durationSeconds: duration,
       phone: caller_phone
