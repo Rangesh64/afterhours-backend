@@ -1,35 +1,73 @@
 const db = require('./db');
 
+const MINIMUM_ACTIVE_THRESHOLD = 20;
+
 /**
- * Calculates credit cost for voice call duration based on pricing rules:
- * - <= 25 seconds: 5 Credits (Fast drop / wrong number)
- * - 26 to 60 seconds: 25 Credits (Full single-minute tier)
- * - > 60 seconds: Pro-rated dynamically at 25 Credits per 60 seconds (ceiling)
+ * Calculates credit cost for voice call duration:
+ * - <= 20 seconds: 5 Credits (Fast drop / wrong number)
+ * - > 20 seconds: 25 Credits per minute block (e.g., 21s-60s = 25 credits, 61s-120s = 50 credits)
  */
 function calculateVoiceCallCredits(durationSeconds) {
   const duration = Math.max(0, parseInt(durationSeconds, 10) || 0);
 
-  if (duration <= 25) {
+  if (duration <= 20) {
     return 5;
   }
 
-  if (duration <= 60) {
-    return 25;
-  }
-
-  // Above 60 seconds: pro-rated per minute block (e.g. 61s-120s = 50 credits)
+  // Billed at 25 credits per 60-second block once past the 20s mark
   const billedMinutes = Math.ceil(duration / 60);
   return billedMinutes * 25;
 }
 
 /**
- * Deducts credits atomically using the Supabase deduct_credits function
- * and logs the entry to activity_logs with event_text populated.
+ * Verifies whether a client has sufficient balance (at least 20 credits)
+ * to initiate any voice call, WhatsApp flow, or lead service.
+ */
+async function hasActiveServiceAccess(userEmail) {
+  const email = (userEmail || '').toLowerCase().trim();
+  if (!email) return false;
+
+  let balance = 0;
+
+  if (db && db.from) {
+    const { data } = await db
+      .from('subscriptions')
+      .select('credits_balance')
+      .eq('user_email', email)
+      .maybeSingle();
+
+    balance = data?.credits_balance ?? 0;
+  } else if (db && db.query) {
+    const res = await db.query(
+      'SELECT credits_balance FROM subscriptions WHERE LOWER(user_email) = $1 LIMIT 1',
+      [email]
+    );
+    balance = res.rows[0]?.credits_balance ?? 0;
+  }
+
+  return balance >= MINIMUM_ACTIVE_THRESHOLD;
+}
+
+/**
+ * Deducts credits atomically.
+ * Automatically halts any deduction if credits_balance drops below 20.
  */
 async function deductClientCredits(userEmail, actionType, meta = {}) {
   const email = (userEmail || '').toLowerCase().trim();
   if (!email) {
     throw new Error('userEmail is required for credit deduction');
+  }
+
+  // 1. Check if user meets the minimum 20 credit safety threshold
+  const canOperate = await hasActiveServiceAccess(email);
+  if (!canOperate) {
+    return {
+      success: false,
+      blocked: true,
+      reason: 'INSUFFICIENT_BALANCE_BELOW_THRESHOLD',
+      message: `Account suspended: credit balance is below the ${MINIMUM_ACTIVE_THRESHOLD} minimum floor. Top up required.`,
+      actionType
+    };
   }
 
   let amount = 0;
@@ -62,9 +100,8 @@ async function deductClientCredits(userEmail, actionType, meta = {}) {
 
   let deductionResult = null;
 
-  // 1. Execute Atomic Stored Function in PostgreSQL / Supabase
+  // 2. Execute Atomic Stored Function in PostgreSQL / Supabase
   if (db && db.rpc) {
-    // Using Supabase client RPC
     const { data, error } = await db.rpc('deduct_credits', {
       p_user_email: email,
       p_amount: amount,
@@ -78,7 +115,6 @@ async function deductClientCredits(userEmail, actionType, meta = {}) {
     }
     deductionResult = data;
   } else if (db && db.query) {
-    // Using pg / node-postgres pool
     const callRpc = `
       SELECT deduct_credits($1, $2, $3, $4) AS result;
     `;
@@ -86,11 +122,7 @@ async function deductClientCredits(userEmail, actionType, meta = {}) {
     deductionResult = rows[0]?.result;
   }
 
-  if (deductionResult && deductionResult.success === false) {
-    console.warn(`[CREDITS WARNING] ${deductionResult.message} for ${email}`);
-  }
-
-  // 2. Log entry to activity_logs with event_text included
+  // 3. Log entry to activity_logs with event_text included
   try {
     const logText = description || `Action: ${actionType} - Deducted ${amount} Credits`;
     const channels = meta.channels || (actionType === 'WHATSAPP_FLOW' ? 'WhatsApp Business' : 'Voice AI + WhatsApp');
@@ -129,5 +161,7 @@ async function deductClientCredits(userEmail, actionType, meta = {}) {
 
 module.exports = {
   calculateVoiceCallCredits,
+  hasActiveServiceAccess,
   deductClientCredits,
+  MINIMUM_ACTIVE_THRESHOLD
 };
