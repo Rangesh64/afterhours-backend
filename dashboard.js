@@ -73,7 +73,6 @@ function parseCSVText(text) {
 
 // Live Dashboard Data Endpoint
 router.get('/data', async (req, res) => {
-  // Prevent any browser or Edge CDN caching
   res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate');
   res.setHeader('Pragma', 'no-cache');
   res.setHeader('Expires', '0');
@@ -94,7 +93,6 @@ router.get('/data', async (req, res) => {
 
     // 1. Fetch live data from Database
     if (db && db.from) {
-      // Supabase-JS Client syntax
       try {
         const { data: sub } = await db
           .from('subscriptions')
@@ -132,7 +130,6 @@ router.get('/data', async (req, res) => {
         console.warn('[DASHBOARD SUPABASE-JS FETCH WARNING]', dbErr.message);
       }
     } else if (db && db.query) {
-      // PostgreSQL Pool syntax
       try {
         const subRes = await db.query('SELECT * FROM subscriptions WHERE LOWER(user_email) = $1 LIMIT 1', [userEmail]);
         if (subRes.rows.length > 0) subData = subRes.rows[0];
@@ -163,17 +160,15 @@ router.get('/data', async (req, res) => {
 
       for (const integ of integData) {
         if (integ.sheet_id && integ.status === 'ACTIVE') {
-          const type = (integ.type || '').toLowerCase(); // 'voice', 'email', or 'whatsapp'
+          const type = (integ.type || '').toLowerCase();
           let rows = [];
 
-          // Try 1: Direct Public CSV Fetch with Cache-Buster
           try {
             rows = await fetchPublicSheetCSV(integ.sheet_id);
           } catch (csvErr) {
             rows = [];
           }
 
-          // Try 2: Google Sheets Service Account API Fallback
           if ((!rows || rows.length === 0) && sheetsApi) {
             try {
               const sheetRes = await sheetsApi.spreadsheets.values.get({
@@ -192,7 +187,6 @@ router.get('/data', async (req, res) => {
       }
     }
 
-    // Compute metric calculations and fallback stream from sheet rows
     const voiceRows = Array.isArray(sheetData.voice) && sheetData.voice.length > 1 ? sheetData.voice.slice(1) : [];
     const whatsappRows = Array.isArray(sheetData.whatsapp) && sheetData.whatsapp.length > 1 ? sheetData.whatsapp.slice(1) : [];
     const emailRows = Array.isArray(sheetData.email) && sheetData.email.length > 1 ? sheetData.email.slice(1) : [];
@@ -213,7 +207,6 @@ router.get('/data', async (req, res) => {
       }));
     }
 
-    // 3. Default Fallback Subscriptions based on email if DB row not present
     if (!subData) {
       if (userEmail === 'rangeshmishra9@gmail.com' || userEmail === 'afterhoursautomation714@gmail.com' || userEmail === 'mahmiasubham@gmail.com') {
         subData = {
@@ -236,7 +229,6 @@ router.get('/data', async (req, res) => {
       }
     }
 
-    // 4. Return complete dashboard data payload
     res.json({
       totalLeads: computedTotalLeads,
       activeIntercepts: computedActiveIntercepts,
@@ -287,10 +279,11 @@ router.post('/calls/log', async (req, res) => {
     const statusOutcome = outcome || 'RECOVERED';
     const createdAt = new Date().toISOString();
     const duration = parseInt(durationSeconds, 10) || 0;
+    const eventDescription = `Inbound Voice Call Intercepted (${duration}s) - Status: ${statusOutcome}`;
 
     let savedData = null;
 
-    // 1. Save Call to Database
+    // 1. Save Call to Database with event_text populated
     if (db && db.from) {
       const { data, error } = await db
         .from('activity_logs')
@@ -300,6 +293,7 @@ router.post('/calls/log', async (req, res) => {
             contact: caller_phone,
             channels: channels,
             outcome: statusOutcome,
+            event_text: eventDescription,
             created_at: createdAt,
           },
         ]);
@@ -308,18 +302,17 @@ router.post('/calls/log', async (req, res) => {
       savedData = data;
     } else if (db && db.query) {
       const insertQuery = `
-        INSERT INTO activity_logs (user_email, contact, channels, outcome, created_at)
-        VALUES ($1, $2, $3, $4, $5)
+        INSERT INTO activity_logs (user_email, contact, channels, outcome, event_text, created_at)
+        VALUES ($1, $2, $3, $4, $5, $6)
         RETURNING *;
       `;
-      const { rows } = await db.query(insertQuery, [email, caller_phone, channels, statusOutcome, createdAt]);
+      const { rows } = await db.query(insertQuery, [email, caller_phone, channels, statusOutcome, eventDescription, createdAt]);
       savedData = rows[0];
     } else {
       return res.status(500).json({ error: 'Database instance not initialized' });
     }
 
     // 2. Deduct Voice Call Credits based on duration
-    // Post-call WhatsApp text is included free (0 credits)
     const voiceDeduction = await deductClientCredits(email, 'VOICE_CALL', {
       durationSeconds: duration,
       phone: caller_phone
