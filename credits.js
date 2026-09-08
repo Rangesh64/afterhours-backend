@@ -10,22 +10,38 @@ async function deductClientCredits(userEmail, actionType, meta = {}) {
   let creditsToDeduct = 0;
   let description = '';
 
+  const normalizedEmail = (userEmail || '').toLowerCase().trim();
+
   switch (actionType) {
     case 'VOICE_CALL':
-      const durationSeconds = meta.durationSeconds || 60;
-      // 25 credits per 60 seconds (pro-rated by second)
-      creditsToDeduct = Math.ceil((durationSeconds / 60) * 25);
-      description = `Inbound Voice Call - ${durationSeconds}s duration`;
+      const durationSeconds = meta.durationSeconds || 0;
+
+      if (durationSeconds <= 25) {
+        // Tier 1: Quick drop / connection activation (<25s)
+        creditsToDeduct = 5;
+        description = `Inbound Voice Call Drop (${durationSeconds}s) - Activation Fee`;
+      } else if (durationSeconds <= 60) {
+        // Tier 2: Standard base call threshold (26s - 60s)
+        creditsToDeduct = 25;
+        description = `Inbound Voice Call (${durationSeconds}s) - Base Minute`;
+      } else {
+        // Tier 3: Beyond 1 minute - 25 credits base + pro-rated 25 credits/min for additional seconds
+        const extraSeconds = durationSeconds - 60;
+        creditsToDeduct = 25 + Math.ceil((extraSeconds / 60) * 25);
+        description = `Inbound Voice Call (${durationSeconds}s) - Extended Duration`;
+      }
       break;
 
     case 'WHATSAPP_FLOW':
+      // 10 credits for direct WhatsApp AI booking confirmation
       creditsToDeduct = 10;
-      description = `WhatsApp Automated Booking Flow`;
+      description = `WhatsApp Direct AI Booking Confirmation`;
       break;
 
     case 'ADVANCE_CONFIRMATION':
+      // 15 credits for advance deposit / fake lead filter verification
       creditsToDeduct = 15;
-      description = `Advance Booking Deposit Verified`;
+      description = `Advance Booking Verification & Fake Lead Filter`;
       break;
 
     default:
@@ -35,7 +51,7 @@ async function deductClientCredits(userEmail, actionType, meta = {}) {
 
   try {
     const query = 'SELECT deduct_credits($1, $2, $3, $4) AS result;';
-    const values = [userEmail, creditsToDeduct, actionType, description];
+    const values = [normalizedEmail, creditsToDeduct, actionType, description];
     const { rows } = await pool.query(query, values);
 
     return rows[0].result;
