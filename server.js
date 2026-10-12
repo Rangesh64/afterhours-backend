@@ -1,23 +1,31 @@
 const express = require('express');
 const cors = require('cors');
+const cookieParser = require('cookie-parser');
 require('dotenv').config();
+
 const db = require('./db');
 const authRoutes = require('./auth');
 const dashboardRoutes = require('./dashboard');
 const webhookRoutes = require('./webhooks');
+const paymentRoutes = require('./payment');
 const { deductClientCredits } = require('./credits');
 
 const app = express();
 const PORT = process.env.PORT || 5000;
 
 // Middleware
-app.use(cors());
+app.use(cors({
+  origin: true,       // Allows your Vercel frontend to connect dynamically
+  credentials: true   // Crucial: This allows the secure HttpOnly cookies to pass through
+}));
 app.use(express.json());
+app.use(cookieParser());
 
 // Register API Routes
 app.use('/api/auth', authRoutes);
 app.use('/api/dashboard', dashboardRoutes);
 app.use('/api/webhooks', webhookRoutes);
+app.use('/api/payment', paymentRoutes);
 
 // Credit Deduction Route
 app.post('/api/credits/deduct', async (req, res) => {
