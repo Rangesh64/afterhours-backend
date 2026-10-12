@@ -5,7 +5,7 @@ const crypto = require('crypto');
 
 // Initialize Razorpay with your exact Key ID
 const razorpay = new Razorpay({
-  key_id: 'rzp_live_TaO8Lf925G4J84',
+  key_id: 'rzp_live_TnAGzb4Izo5NKS',
   key_secret: process.env.RAZORPAY_KEY_SECRET || 'dummy_secret_to_prevent_crashes',
 });
 
