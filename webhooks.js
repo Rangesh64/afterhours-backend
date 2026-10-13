@@ -113,10 +113,38 @@ router.post('/vapi', async (req, res) => {
       const call = message.call || {};
       const customer = call.customer || {};
       
-      // Extract call duration in seconds
-      const durationSeconds = Math.round(message.durationSeconds || call.duration || 0);
-      const callerPhone = customer.number || message.customer?.number || 'Unknown Caller';
+      // Extract call duration safely (Handles timestamps, minutes, and raw seconds)
+      let durationSeconds = 0;
       
+      // 1. Most accurate: Calculate from exact start/end timestamps
+      if (call.startedAt && call.endedAt) {
+        durationSeconds = Math.round((new Date(call.endedAt).getTime() - new Date(call.startedAt).getTime()) / 1000);
+      } 
+      // 2. Fallback for providers sending minutes (e.g., Bland AI)
+      else if (payload.call_length !== undefined) {
+        durationSeconds = Math.round(parseFloat(payload.call_length) * 60);
+      } 
+      // 3. Fallback for raw duration formats
+      else {
+        let raw = message.durationSeconds || call.duration || payload.duration || 0;
+        if (typeof raw === 'string' && raw.includes(':')) {
+          const parts = raw.split(':'); // Handles "02:39" format
+          durationSeconds = (parseInt(parts[0]) * 60) + parseInt(parts[1]);
+        } else {
+          let num = parseFloat(raw) || 0;
+          // If the provider sends a small decimal (e.g., 1.25), it's likely minutes
+          if (num > 0 && num < 20 && String(raw).includes('.')) {
+            durationSeconds = Math.round(num * 60);
+          } else {
+            durationSeconds = Math.round(num); // Already in seconds
+          }
+        }
+      }
+      
+      // Prevent negative time errors
+      durationSeconds = Math.max(0, durationSeconds);
+
+      const callerPhone = customer.number || message.customer?.number || 'Unknown Caller';
       // Get the client email associated with this phone line (or default fallback)
       const clientEmail = (
         call.assistant?.metadata?.clientEmail || 
