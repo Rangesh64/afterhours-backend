@@ -113,36 +113,31 @@ router.post('/vapi', async (req, res) => {
       const call = message.call || {};
       const customer = call.customer || {};
       
-      // Extract call duration safely (Handles timestamps, minutes, and raw seconds)
+     
+          // Extract call duration safely without crashing
       let durationSeconds = 0;
       
-      // 1. Most accurate: Calculate from exact start/end timestamps
-      if (call.startedAt && call.endedAt) {
-        durationSeconds = Math.round((new Date(call.endedAt).getTime() - new Date(call.startedAt).getTime()) / 1000);
-      } 
-      // 2. Fallback for providers sending minutes (e.g., Bland AI)
-      else if (payload.call_length !== undefined) {
-        durationSeconds = Math.round(parseFloat(payload.call_length) * 60);
-      } 
-      // 3. Fallback for raw duration formats
-      else {
-        let raw = message.durationSeconds || call.duration || payload.duration || 0;
-        if (typeof raw === 'string' && raw.includes(':')) {
-          const parts = raw.split(':'); // Handles "02:39" format
-          durationSeconds = (parseInt(parts[0]) * 60) + parseInt(parts[1]);
-        } else {
-          let num = parseFloat(raw) || 0;
-          // If the provider sends a small decimal (e.g., 1.25), it's likely minutes
-          if (num > 0 && num < 20 && String(raw).includes('.')) {
-            durationSeconds = Math.round(num * 60);
-          } else {
-            durationSeconds = Math.round(num); // Already in seconds
-          }
+      // Explicitly check message.duration first, as Vapi often hides the "2:39" string here
+      const raw = message.duration || message.durationSeconds || call.duration || payload.duration || payload.call_length || "0";
+
+      if (typeof raw === 'string' && raw.includes(':')) {
+        const parts = raw.split(':');
+        durationSeconds = (parseInt(parts[0] || 0) * 60) + parseInt(parts[1] || 0);
+      } else if (call.startedAt && call.endedAt) {
+        const start = new Date(call.startedAt).getTime();
+        const end = new Date(call.endedAt).getTime();
+        if (!Number.isNaN(start) && !Number.isNaN(end)) {
+          durationSeconds = (end - start) / 1000;
         }
       }
-      
-      // Prevent negative time errors
-      durationSeconds = Math.max(0, durationSeconds);
+
+      if (!durationSeconds || Number.isNaN(durationSeconds)) {
+        let num = parseFloat(raw) || 0;
+        durationSeconds = (num > 0 && num < 20 && String(raw).includes('.')) ? num * 60 : num;
+      }
+
+      // ABSOLUTE SAFETY CHECK: Force into a clean integer so the database never crashes
+      durationSeconds = Math.max(0, Math.round(Number(durationSeconds) || 0));
 
       const callerPhone = customer.number || message.customer?.number || 'Unknown Caller';
       // Get the client email associated with this phone line (or default fallback)
